@@ -105,8 +105,26 @@ def run_wham_webcam(cfg,
                 # Process tracking results
                 tracking_results_chunk = detector.process(fps)
                 
-                # Extract features from frames
-                tracking_results_chunk = extractor.run_on_frames(frame_buffer, tracking_results_chunk)
+                # Create a temporary video file for feature extraction
+                temp_feat_video_path = osp.join(output_pth, 'temp_feat_stream.mp4')
+                temp_feat_video = cv2.VideoWriter(
+                    temp_feat_video_path,
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    fps,
+                    (width, height)
+                )
+                
+                # Write frames to temporary video
+                for frame in frame_buffer:
+                    temp_feat_video.write(frame)
+                temp_feat_video.release()
+                
+                # Extract features using the original method
+                tracking_results_chunk = extractor.run(temp_feat_video_path, tracking_results_chunk)
+                
+                # Remove temporary feature video
+                if osp.exists(temp_feat_video_path):
+                    os.remove(temp_feat_video_path)
                 
                 # If using SLAM, process SLAM results
                 if slam is not None:
@@ -164,6 +182,8 @@ def run_wham_webcam(cfg,
             
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Error in webcam processing: {str(e)}")
     finally:
         # Clean up
         if temp_video is not None:
@@ -238,42 +258,65 @@ def process_wham_chunk(cfg, network, tracking_results, slam_results, width, heig
     
     return results
 
+# First, modify the visualize_results function to fix the Renderer initialization
 def visualize_results(frame_buffer, results, smpl, vis_global=False):
     """Visualize WHAM results alongside original frames."""
-    from lib.vis.renderer import Renderer
-    
-    # Initialize renderer
-    renderer = Renderer(resolution=(frame_buffer[0].shape[1], frame_buffer[0].shape[0]))
-    
-    for i, frame in enumerate(frame_buffer):
-        # Find which subject and frame this corresponds to
-        for subj_id, subj_data in results.items():
-            frame_indices = subj_data['frame_ids']
-            if i in frame_indices:
-                idx = np.where(frame_indices == i)[0][0]
-                
-                # Get the data for rendering
-                vertices = subj_data['verts'][idx]
-                pose = torch.from_numpy(subj_data['pose'][idx]).float().unsqueeze(0)
-                shape = torch.from_numpy(subj_data['betas']).float().unsqueeze(0)
-                
-                # Render the mesh
-                rendered_img = renderer.render(
-                    vertices,
-                    smpl.faces,
-                    frame.copy(),
-                    mesh_color=[0.8, 0.3, 0.3]
-                )
-                
-                # Create side-by-side display
+    try:
+        from lib.vis.renderer import Renderer
+        
+        # Initialize renderer - Fix the initialization parameters
+        img_width = frame_buffer[0].shape[1]
+        img_height = frame_buffer[0].shape[0]
+        focal_length = (img_width ** 2 + img_height ** 2) ** 0.5
+        renderer = Renderer(width=img_width, height=img_height, focal_length=focal_length, device=cfg.DEVICE, faces=smpl.faces)
+        
+        for i, frame in enumerate(frame_buffer):
+            # Find which subject and frame this corresponds to
+            rendered = False
+            for subj_id, subj_data in results.items():
+                frame_indices = subj_data['frame_ids']
+                if i in frame_indices:
+                    idx = np.where(frame_indices == i)[0][0]
+                    
+                    # Get the data for rendering
+                    vertices = subj_data['verts'][idx]
+                    
+                    # Render the mesh
+                    rendered_img = renderer.render(
+                        vertices,
+                        smpl.faces,
+                        frame.copy(),
+                        mesh_color=[0.8, 0.3, 0.3]
+                    )
+                    
+                    # Create side-by-side display
+                    display_frame = np.zeros((frame.shape[0], frame.shape[1]*2, 3), dtype=np.uint8)
+                    display_frame[:, :frame.shape[1]] = frame
+                    display_frame[:, frame.shape[1]:] = rendered_img
+                    
+                    # Display the frame
+                    cv2.imshow('WHAM Webcam Demo', display_frame)
+                    cv2.waitKey(1)
+                    rendered = True
+                    break
+            
+            # If no corresponding result was found, just show the original frame
+            if not rendered:
                 display_frame = np.zeros((frame.shape[0], frame.shape[1]*2, 3), dtype=np.uint8)
                 display_frame[:, :frame.shape[1]] = frame
-                display_frame[:, frame.shape[1]:] = rendered_img
-                
-                # Display the frame
+                display_frame[:, frame.shape[1]:] = frame
                 cv2.imshow('WHAM Webcam Demo', display_frame)
                 cv2.waitKey(1)
-                break
+    
+    except Exception as e:
+        logger.error(f"Error in visualization: {str(e)}")
+        # Fallback to simple display
+        for frame in frame_buffer:
+            display_frame = np.zeros((frame.shape[0], frame.shape[1]*2, 3), dtype=np.uint8)
+            display_frame[:, :frame.shape[1]] = frame
+            display_frame[:, frame.shape[1]:] = frame
+            cv2.imshow('WHAM Webcam Demo', display_frame)
+            cv2.waitKey(1)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -289,6 +332,9 @@ if __name__ == '__main__':
     
     parser.add_argument('--fps_target', type=int, default=30,
                         help='Target frames per second for processing')
+    
+    parser.add_argument('--buffer_size', type=int, default=30,
+                        help='Number of frames to buffer before processing')
 
     args = parser.parse_args()
 
