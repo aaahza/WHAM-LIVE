@@ -104,6 +104,11 @@ def run_wham_webcam(cfg,
                 
                 # Process tracking results
                 tracking_results_chunk = detector.process(fps)
+
+                if not tracking_results_chunk:  # Check if tracking results are empty
+                    logger.warning("No detections found in current batch of frames. Skipping processing.")
+                    frame_buffer = []  # Clear buffer and continue
+                    continue
                 
                 # Create a temporary video file for feature extraction
                 temp_feat_video_path = osp.join(output_pth, 'temp_feat_stream.mp4')
@@ -121,6 +126,10 @@ def run_wham_webcam(cfg,
                 
                 # Extract features using the original method
                 tracking_results_chunk = extractor.run(temp_feat_video_path, tracking_results_chunk)
+                if not tracking_results_chunk:
+                    logger.warning("Feature extraction returned no results. Skipping processing.")
+                    frame_buffer = []  # Clear buffer and continue
+                    continue
                 
                 # Remove temporary feature video
                 if osp.exists(temp_feat_video_path):
@@ -204,6 +213,11 @@ def run_wham_webcam(cfg,
 
 def process_wham_chunk(cfg, network, tracking_results, slam_results, width, height, fps):
     """Process a chunk of frames through WHAM."""
+
+    if not tracking_results:
+        logger.warning("No tracking results to process")
+        return defaultdict(dict)
+    
     # Build dataset for the chunk
     dataset = CustomDataset(cfg, tracking_results, slam_results, width, height, fps)
     
