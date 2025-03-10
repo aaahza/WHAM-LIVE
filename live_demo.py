@@ -130,8 +130,15 @@ def run_wham_webcam(cfg,
                 if slam is not None:
                     slam_results_chunk = slam.process()
                 else:
-                    slam_results_chunk = np.zeros((len(frame_buffer), 7))
-                    slam_results_chunk[:, 3] = 1.0  # Unit quaternion
+                    num_frames = len(frame_buffer)
+                    slam_results_chunk = []
+                    for i in range(num_frames):
+                        # Create unit quaternion [0, 0, 0, 1, 0, 0, 0] for each frame
+                        # [x, y, z, qw, qx, qy, qz]
+                        frame_result = np.zeros(7)
+                        frame_result[3] = 1.0  # Unit quaternion (w component)
+                        slam_results_chunk.append(frame_result)
+
                 
                 # Process the chunk through WHAM
                 results = process_wham_chunk(
