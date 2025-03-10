@@ -91,7 +91,11 @@ def run_wham_webcam(cfg,
             frame_buffer.append(frame.copy())
             
             # Run detection and tracking
-            person_detections = detector.track(frame, fps, buffer_size)
+            try:
+                person_detections = detector.track(frame, fps, buffer_size)
+            except Exception as e:
+                logger.error(f"Error in person detection: {str(e)}")
+                person_detections = []
             
             # If using SLAM, write frame to temporary video
             if temp_video is not None:
@@ -103,11 +107,15 @@ def run_wham_webcam(cfg,
                 logger.info(f"Processing buffer of {len(frame_buffer)} frames")
                 
                 # Process tracking results
-                tracking_results_chunk = detector.process(fps)
-
-                if not tracking_results_chunk:  # Check if tracking results are empty
-                    logger.warning("No detections found in current batch of frames. Skipping processing.")
-                    frame_buffer = []  # Clear buffer and continue
+                try:
+                    tracking_results_chunk = detector.process(fps)
+                    if not tracking_results_chunk:
+                        logger.warning("No detections found in current batch of frames. Skipping processing.")
+                        frame_buffer = []  # Clear buffer and continue
+                        continue
+                except Exception as e:
+                    logger.error(f"Error in detector processing: {str(e)}")
+                    frame_buffer = []
                     continue
                 
                 # Create a temporary video file for feature extraction
@@ -125,10 +133,23 @@ def run_wham_webcam(cfg,
                 temp_feat_video.release()
                 
                 # Extract features using the original method
-                tracking_results_chunk = extractor.run(temp_feat_video_path, tracking_results_chunk)
-                if not tracking_results_chunk:
-                    logger.warning("Feature extraction returned no results. Skipping processing.")
-                    frame_buffer = []  # Clear buffer and continue
+                try:
+                    tracking_results_chunk = extractor.run(temp_feat_video_path, tracking_results_chunk)
+                    if not tracking_results_chunk:
+                        logger.warning("Feature extraction returned no results. Skipping processing.")
+                        frame_buffer = []  # Clear buffer and continue
+                        
+                        # Remove temporary feature video
+                        if osp.exists(temp_feat_video_path):
+                            os.remove(temp_feat_video_path)
+                        continue
+                except Exception as e:
+                    logger.error(f"Error in feature extraction: {str(e)}")
+                    frame_buffer = []
+                    
+                    # Remove temporary feature video
+                    if osp.exists(temp_feat_video_path):
+                        os.remove(temp_feat_video_path)
                     continue
                 
                 # Remove temporary feature video
@@ -136,32 +157,59 @@ def run_wham_webcam(cfg,
                     os.remove(temp_feat_video_path)
                 
                 # If using SLAM, process SLAM results
-                if slam is not None:
-                    slam_results_chunk = slam.process()
-                else:
-                    num_frames = len(frame_buffer)
+                try:
+                    if slam is not None:
+                        slam_results_chunk = slam.process()
+                    else:
+                        # Fix: Create a list of arrays instead of a single numpy array
+                        num_frames = len(frame_buffer)
+                        slam_results_chunk = []
+                        for i in range(num_frames):
+                            # Create unit quaternion [0, 0, 0, 1, 0, 0, 0] for each frame
+                            # [x, y, z, qw, qx, qy, qz]
+                            frame_result = np.zeros(7)
+                            frame_result[3] = 1.0  # Unit quaternion (w component)
+                            slam_results_chunk.append(frame_result)
+                except Exception as e:
+                    logger.error(f"Error in SLAM processing: {str(e)}")
                     slam_results_chunk = []
-                    for i in range(num_frames):
-                        # Create unit quaternion [0, 0, 0, 1, 0, 0, 0] for each frame
-                        # [x, y, z, qw, qx, qy, qz]
+                    for i in range(len(frame_buffer)):
                         frame_result = np.zeros(7)
-                        frame_result[3] = 1.0  # Unit quaternion (w component)
+                        frame_result[3] = 1.0
                         slam_results_chunk.append(frame_result)
-
                 
                 # Process the chunk through WHAM
-                results = process_wham_chunk(
-                    cfg, 
-                    network, 
-                    tracking_results_chunk, 
-                    slam_results_chunk, 
-                    width, 
-                    height, 
-                    fps
-                )
-                
-                # Visualize the results
-                visualize_results(frame_buffer, results, network.smpl, run_global)
+                try:
+                    results = process_wham_chunk(
+                        cfg, 
+                        network, 
+                        tracking_results_chunk, 
+                        slam_results_chunk, 
+                        width, 
+                        height, 
+                        fps
+                    )
+                    
+                    # Visualize the results
+                    visualize_results(frame_buffer, results, network.smpl, run_global)
+                except Exception as e:
+                    logger.error(f"Error in WHAM processing: {str(e)}")
+                    # Simple display of frames without WHAM processing
+                    for frame in frame_buffer:
+                        display_frame = np.zeros((frame.shape[0], frame.shape[1]*2, 3), dtype=np.uint8)
+                        display_frame[:, :frame.shape[1]] = frame
+                        display_frame[:, frame.shape[1]:] = frame
+                        cv2.putText(
+                            display_frame, 
+                            "Error in WHAM processing", 
+                            (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            1, 
+                            (0, 0, 255), 
+                            2
+                        )
+                        cv2.imshow('WHAM Webcam Demo', display_frame)
+                        cv2.waitKey(1)
                 
                 # Clear buffer for next batch
                 frame_buffer = []
@@ -213,11 +261,11 @@ def run_wham_webcam(cfg,
 
 def process_wham_chunk(cfg, network, tracking_results, slam_results, width, height, fps):
     """Process a chunk of frames through WHAM."""
-
+    # Add a check to make sure there are tracking results
     if not tracking_results:
         logger.warning("No tracking results to process")
         return defaultdict(dict)
-    
+        
     # Build dataset for the chunk
     dataset = CustomDataset(cfg, tracking_results, slam_results, width, height, fps)
     
@@ -279,7 +327,6 @@ def process_wham_chunk(cfg, network, tracking_results, slam_results, width, heig
     
     return results
 
-# First, modify the visualize_results function to fix the Renderer initialization
 def visualize_results(frame_buffer, results, smpl, vis_global=False):
     """Visualize WHAM results alongside original frames."""
     try:
